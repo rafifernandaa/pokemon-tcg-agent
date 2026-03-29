@@ -1,19 +1,21 @@
 """
-agent.py — Pokemon TCG Statistics Agent
-========================================
-An AI agent for statistical analysis of Pokemon Trading Card Game data.
+pokemon_tcg_stats/agent.py — Agent definition only.
+HTTP serving is handled by main.py at the project root.
 
-Tools included:
-  1. Function Tool   — calculate_descriptive_stats  (pure Python stats engine)
-  2. Built-in Tool   — google_search                (ADK built-in, for grounding)
-  3. Third-party API — fetch_pokemon_cards           (Pokemon TCG API v2)
+Tools:
+  1. Function Tool   — calculate_descriptive_stats
+  2. Function Tool   — serper_google_search (custom search via serper.dev)
+  3. Third-party API — fetch_pokemon_cards (pokemontcg.io)
 
-Author  : Rafi Fernanda Aldin
-Major   : Bachelor of Statistics
-Track   : 1 — Build and Deploy AI Agents using Gemini, ADK, and Cloud Run
+Multi-agent architecture (required because google_search built-in
+cannot be mixed with FunctionTools in Gemini API):
+  root_agent
+  ├── data_agent   → tcg_api_tool + stats_tool
+  └── search_agent → serper_tool
 """
 
 import os
+import json
 import statistics
 from typing import Optional
 
@@ -21,11 +23,12 @@ import httpx
 from dotenv import load_dotenv
 
 from google.adk.agents import Agent
-from google.adk.tools import FunctionTool, google_search
+from google.adk.tools import FunctionTool
 
 load_dotenv()
 
 POKEMON_TCG_API_KEY = os.getenv("POKEMON_TCG_API_KEY", "")
+SERPER_API_KEY      = os.getenv("SERPER_API_KEY", "")
 TCG_BASE_URL        = "https://api.pokemontcg.io/v2"
 
 
@@ -33,20 +36,23 @@ TCG_BASE_URL        = "https://api.pokemontcg.io/v2"
 # TOOL 1 — Function Tool: Descriptive Statistics Calculator
 # ══════════════════════════════════════════════════════════════════════════════
 
-def calculate_descriptive_stats(values: list[float], variable_name: str = "variable") -> dict:
+def calculate_descriptive_stats(
+    values: list[float],
+    variable_name: str = "variable",
+) -> dict:
     """
     Calculates full descriptive statistics for a list of numeric values.
 
-    Computes: n, mean, median, mode, standard deviation, variance,
-    min, max, range, Q1, Q3, IQR, skewness, and coefficient of variation.
-    Ideal for analysing HP distributions, attack damage, card prices, etc.
+    Computes: n, mean, median, mode, std dev, variance, min, max, range,
+    Q1, Q3, IQR, coefficient of variation, and skewness direction.
+    Use this after fetching card data to analyse HP, attack damage, or prices.
 
     Args:
-        values        : List of numeric values (e.g. HP values of a set of cards).
-        variable_name : Label for the variable (e.g. "HP", "Market Price USD").
+        values        : List of numeric values (e.g. HP values of cards).
+        variable_name : Label for the variable being analysed.
 
     Returns:
-        dict containing all statistics and a plain-language interpretation.
+        dict with all statistics and a plain-language interpretation.
     """
     if not values:
         return {"error": "Cannot compute statistics on an empty list."}
@@ -58,7 +64,7 @@ def calculate_descriptive_stats(values: list[float], variable_name: str = "varia
     try:
         mode = statistics.mode(values)
     except statistics.StatisticsError:
-        mode = None  # No unique mode — multimodal or all unique
+        mode = None
 
     std = statistics.stdev(values)    if n > 1 else 0.0
     var = statistics.variance(values) if n > 1 else 0.0
@@ -67,44 +73,39 @@ def calculate_descriptive_stats(values: list[float], variable_name: str = "varia
 
     sorted_v = sorted(values)
     half     = n // 2
-    q1 = statistics.median(sorted_v[:half])
-    q3 = statistics.median(sorted_v[(n + 1) // 2:])
+    q1  = statistics.median(sorted_v[:half])
+    q3  = statistics.median(sorted_v[(n + 1) // 2:])
     iqr = q3 - q1
+    cv  = (std / mean * 100) if mean != 0 else 0
 
-    # Coefficient of Variation (relative dispersion)
-    cv = (std / mean * 100) if mean != 0 else 0
-
-    # Pearson's second skewness coefficient
     skew_val = (3 * (mean - med) / std) if std != 0 else 0
-    if   skew_val >  0.1: skew_label = "positively skewed (long tail to the right)"
-    elif skew_val < -0.1: skew_label = "negatively skewed (long tail to the left)"
+    if   skew_val >  0.1: skew_label = "positively skewed (tail to the right)"
+    elif skew_val < -0.1: skew_label = "negatively skewed (tail to the left)"
     else                : skew_label = "approximately symmetric"
 
-    variability_label = "high" if cv > 30 else "moderate" if cv > 15 else "low"
+    variability = "high" if cv > 30 else "moderate" if cv > 15 else "low"
 
     return {
-        "variable"                    : variable_name,
-        "n"                           : n,
-        "mean"                        : round(mean, 2),
-        "median"                      : round(med, 2),
-        "mode"                        : mode,
-        "std_dev"                     : round(std, 2),
-        "variance"                    : round(var, 2),
-        "min"                         : round(mn, 2),
-        "max"                         : round(mx, 2),
-        "range"                       : round(mx - mn, 2),
-        "Q1_25th_percentile"          : round(q1, 2),
-        "Q3_75th_percentile"          : round(q3, 2),
-        "IQR_interquartile_range"     : round(iqr, 2),
-        "coefficient_of_variation_%"  : round(cv, 2),
-        "skewness_direction"          : skew_label,
+        "variable"                  : variable_name,
+        "n"                         : n,
+        "mean"                      : round(mean, 2),
+        "median"                    : round(med, 2),
+        "mode"                      : mode,
+        "std_dev"                   : round(std, 2),
+        "variance"                  : round(var, 2),
+        "min"                       : round(mn, 2),
+        "max"                       : round(mx, 2),
+        "range"                     : round(mx - mn, 2),
+        "Q1_25th_percentile"        : round(q1, 2),
+        "Q3_75th_percentile"        : round(q3, 2),
+        "IQR"                       : round(iqr, 2),
+        "coefficient_of_variation_%": round(cv, 2),
+        "skewness"                  : skew_label,
         "interpretation": (
-            f"For {n} observations of '{variable_name}': "
-            f"the mean is {mean:.2f} and median is {med:.2f}. "
-            f"The distribution is {skew_label}. "
-            f"The IQR is {iqr:.2f}, meaning the middle 50% of values fall between "
-            f"{q1:.2f} and {q3:.2f}. "
-            f"CV = {cv:.1f}% indicates {variability_label} relative variability."
+            f"For {n} '{variable_name}' values: mean={mean:.2f}, median={med:.2f}. "
+            f"Distribution is {skew_label}. "
+            f"Middle 50% falls between {q1:.2f} and {q3:.2f} (IQR={iqr:.2f}). "
+            f"CV={cv:.1f}% → {variability} relative variability."
         ),
     }
 
@@ -113,17 +114,53 @@ stats_tool = FunctionTool(func=calculate_descriptive_stats)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TOOL 2 — Built-in Tool: Google Search
+# TOOL 2 — Function Tool: Custom Google Search via Serper.dev
+# (Replaces ADK built-in google_search to avoid the multi-tool conflict)
 # ══════════════════════════════════════════════════════════════════════════════
-# google_search is an ADK built-in tool — imported directly, no wrapper needed.
-# The agent uses it to ground answers with current web information such as:
-#   - Current competitive TCG meta and tier lists
-#   - Upcoming set release dates and spoilers
-#   - Tournament results and price trends
+
+def serper_google_search(query: str) -> str:
+    """
+    Searches Google for real-time information using the Serper.dev API.
+    Use for competitive TCG meta, tournament results, price trends, new sets.
+
+    Args:
+        query : Search query string (e.g. "Pokemon TCG Scarlet Violet meta 2025").
+
+    Returns:
+        Formatted string with top 5 search result titles, links, and snippets.
+    """
+    if not SERPER_API_KEY:
+        return "Error: SERPER_API_KEY not found in environment variables."
+
+    try:
+        resp = httpx.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+            content=json.dumps({"q": query, "num": 5}),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+
+        snippets = []
+        for r in results.get("organic", [])[:5]:
+            snippets.append(
+                f"Title  : {r.get('title', 'N/A')}\n"
+                f"Link   : {r.get('link', 'N/A')}\n"
+                f"Snippet: {r.get('snippet', 'N/A')}"
+            )
+
+        return "\n---\n".join(snippets) if snippets else "No results found."
+
+    except Exception as exc:
+        return f"Search failed: {exc}"
+
+
+serper_tool = FunctionTool(func=serper_google_search)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TOOL 3 — Third-party API Tool: Pokemon TCG API v2 (pokemontcg.io)
+# TOOL 3 — Third-party API: Pokemon TCG API v2 (pokemontcg.io)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_pokemon_cards(
@@ -135,23 +172,20 @@ def fetch_pokemon_cards(
     page_size : int = 20,
 ) -> dict:
     """
-    Fetches real Pokemon TCG card data from the official Pokemon TCG API v2.
-
-    Returns structured card data including HP, attack damage, retreat cost,
-    rarity, set info, and TCGPlayer market prices — ready for statistical analysis.
+    Fetches Pokemon TCG card data from the official Pokemon TCG API v2.
+    Returns HP, attack damage, retreat cost, rarity, set, and market price.
 
     Args:
-        name      : Card name, partial or full (e.g. "Charizard", "Pikachu VMAX").
-        types     : Pokemon element type (e.g. "Fire", "Water", "Psychic", "Dragon").
-        set_name  : Set name (e.g. "Base Set", "Scarlet & Violet", "Obsidian Flames").
-        rarity    : Card rarity (e.g. "Common", "Uncommon", "Rare Holo", "Illustration Rare").
-        supertype : Card category — "Pokémon", "Trainer", or "Energy".
-        page_size : Number of cards to fetch (default 20, max 250).
+        name      : Card name (e.g. "Charizard", "Pikachu VMAX").
+        types     : Pokemon type (e.g. "Fire", "Water", "Psychic").
+        set_name  : Set name (e.g. "Scarlet & Violet", "Obsidian Flames").
+        rarity    : Rarity (e.g. "Common", "Rare Holo", "Illustration Rare").
+        supertype : "Pokémon", "Trainer", or "Energy".
+        page_size : Cards to fetch (default 20, max 250).
 
     Returns:
-        dict with card list and batch summary statistics for HP, price, and attack damage.
+        dict with card list and batch summary stats for HP, price, and damage.
     """
-    # ── Build query ───────────────────────────────────────────────────────────
     queries = []
     if name      : queries.append(f'name:"{name}"')
     if types     : queries.append(f'types:{types}')
@@ -159,111 +193,87 @@ def fetch_pokemon_cards(
     if rarity    : queries.append(f'rarity:"{rarity}"')
     if supertype : queries.append(f'supertype:"{supertype}"')
 
-    params: dict = {"pageSize": min(page_size, 250)}
+    params  = {"pageSize": min(page_size, 250)}
     if queries:
         params["q"] = " ".join(queries)
 
-    headers = {}
-    if POKEMON_TCG_API_KEY:
-        headers["X-Api-Key"] = POKEMON_TCG_API_KEY  # Higher rate limit with key
+    headers = {"X-Api-Key": POKEMON_TCG_API_KEY} if POKEMON_TCG_API_KEY else {}
 
-    # ── HTTP request ──────────────────────────────────────────────────────────
     try:
         resp = httpx.get(
             f"{TCG_BASE_URL}/cards",
-            params=params,
-            headers=headers,
-            timeout=15,
+            params=params, headers=headers, timeout=15,
         )
         resp.raise_for_status()
-        data = resp.json()
-    except httpx.HTTPError as exc:
-        return {"error": f"Pokemon TCG API request failed: {exc}"}
+        raw  = resp.json()
+        data = raw.get("data", [])
+    except Exception as exc:
+        return {"error": str(exc)}
 
-    cards_raw = data.get("data", [])
-    if not cards_raw:
-        return {
-            "total": 0,
-            "cards": [],
-            "message": "No cards found. Try broader filters (e.g. remove rarity or set name).",
-        }
+    if not data:
+        return {"total": 0, "cards": [], "message": "No cards found for these filters."}
 
-    # ── Parse each card ───────────────────────────────────────────────────────
     cards_out = []
-    for c in cards_raw:
-        # Extract attack damages (some cards have 2–3 attacks)
-        attacks    = c.get("attacks") or []
-        damages    = []
-        atk_parsed = []
-        for atk in attacks:
-            raw_dmg = atk.get("damage", "").replace("+", "").replace("×", "").replace("-", "").strip()
+    for c in data:
+        # Parse HP
+        hp_val = int(c["hp"]) if c.get("hp", "").isdigit() else None
+
+        # Parse attacks
+        attacks = c.get("attacks") or []
+        damages = []
+        atk_out = []
+        for a in attacks:
+            raw_dmg = a.get("damage", "").replace("+","").replace("×","").replace("-","").strip()
             dmg_int = int(raw_dmg) if raw_dmg.isdigit() else None
-            if dmg_int is not None:
-                damages.append(dmg_int)
-            atk_parsed.append({
-                "name"      : atk.get("name"),
-                "damage"    : atk.get("damage", "0"),
-                "energy_cost": len(atk.get("cost", [])),
-                "text"      : atk.get("text", ""),
+            if dmg_int: damages.append(dmg_int)
+            atk_out.append({
+                "name"       : a.get("name"),
+                "damage"     : a.get("damage", "0"),
+                "energy_cost": len(a.get("cost", [])),
             })
 
-        # Extract best available market price from TCGPlayer
-        prices       = c.get("tcgplayer", {}).get("prices", {})
-        market_price = None
+        # Parse market price
+        prices = c.get("tcgplayer", {}).get("prices", {})
+        m_price = None
         for tier in ("holofoil", "reverseHolofoil", "normal", "1stEditionHolofoil"):
             if tier in prices and prices[tier].get("market"):
-                market_price = prices[tier]["market"]
+                m_price = prices[tier]["market"]
                 break
 
-        # Parse HP (stored as string in API)
-        hp_str = c.get("hp", "")
-        hp_int = int(hp_str) if hp_str.isdigit() else None
-
         cards_out.append({
-            "id"                 : c.get("id"),
             "name"               : c.get("name"),
-            "supertype"          : c.get("supertype"),
-            "subtypes"           : c.get("subtypes", []),
+            "hp"                 : hp_val,
             "types"              : c.get("types", []),
-            "hp"                 : hp_int,
-            "retreat_cost_count" : len(c.get("retreatCost", [])),
-            "attacks"            : atk_parsed,
-            "max_attack_damage"  : max(damages)                          if damages else None,
-            "avg_attack_damage"  : round(sum(damages) / len(damages), 1) if damages else None,
-            "weaknesses"         : [w.get("type") for w in c.get("weaknesses", [])],
-            "resistances"        : [r.get("type") for r in c.get("resistances", [])],
             "rarity"             : c.get("rarity"),
             "set_name"           : c.get("set", {}).get("name"),
-            "set_series"         : c.get("set", {}).get("series"),
-            "release_date"       : c.get("set", {}).get("releaseDate"),
-            "market_price_usd"   : market_price,
-            "image_url"          : c.get("images", {}).get("large"),
+            "attacks"            : atk_out,
+            "max_attack_damage"  : max(damages) if damages else None,
+            "avg_attack_damage"  : round(sum(damages)/len(damages),1) if damages else None,
+            "retreat_cost_count" : len(c.get("retreatCost", [])),
+            "market_price_usd"   : m_price,
         })
 
-    # ── Batch summary statistics ──────────────────────────────────────────────
-    def _safe_stats(vals):
+    def _s(vals):
         if not vals:
-            return {"mean": None, "median": None, "min": None, "max": None, "std_dev": None}
+            return {"mean": None, "median": None, "min": None, "max": None}
         return {
-            "mean"    : round(statistics.mean(vals), 2),
-            "median"  : statistics.median(vals),
-            "min"     : min(vals),
-            "max"     : max(vals),
-            "std_dev" : round(statistics.stdev(vals), 2) if len(vals) > 1 else 0,
+            "mean"  : round(statistics.mean(vals), 2),
+            "median": statistics.median(vals),
+            "min"   : min(vals),
+            "max"   : max(vals),
         }
 
-    hp_values    = [c["hp"]                for c in cards_out if c["hp"]                is not None]
-    price_values = [c["market_price_usd"]  for c in cards_out if c["market_price_usd"]  is not None]
-    dmg_values   = [c["max_attack_damage"] for c in cards_out if c["max_attack_damage"] is not None]
+    hp_vals    = [c["hp"]               for c in cards_out if c["hp"]               is not None]
+    price_vals = [c["market_price_usd"] for c in cards_out if c["market_price_usd"] is not None]
+    dmg_vals   = [c["max_attack_damage"]for c in cards_out if c["max_attack_damage"]is not None]
 
     return {
-        "total_fetched"             : len(cards_out),
-        "total_available_in_api"    : data.get("totalCount", len(cards_out)),
-        "filters_applied"           : params.get("q", "none"),
-        "cards"                     : cards_out,
-        "batch_hp_stats"            : _safe_stats(hp_values),
-        "batch_market_price_usd_stats": _safe_stats(price_values),
-        "batch_max_attack_damage_stats": _safe_stats(dmg_values),
+        "total_fetched"           : len(cards_out),
+        "total_in_api"            : raw.get("totalCount", len(cards_out)),
+        "cards"                   : cards_out,
+        "batch_hp_stats"          : _s(hp_vals),
+        "batch_price_usd_stats"   : _s(price_vals),
+        "batch_max_damage_stats"  : _s(dmg_vals),
     }
 
 
@@ -271,94 +281,78 @@ tcg_api_tool = FunctionTool(func=fetch_pokemon_cards)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROOT AGENT — Professor Stats
+# MULTI-AGENT ARCHITECTURE
+# data_agent   → Tool 1 (stats) + Tool 3 (TCG API)   — no search built-in
+# search_agent → Tool 2 (serper search)               — custom FunctionTool
+# root_agent   → orchestrator only, no direct tools
 # ══════════════════════════════════════════════════════════════════════════════
+
+data_agent = Agent(
+    name        = "data_agent",
+    model       = "gemini-2.5-flash",
+    description = (
+        "Fetches real Pokemon TCG card data and performs descriptive statistical "
+        "analysis (mean, median, std dev, IQR, skewness, CV) on HP, attack damage, "
+        "market prices, and other numeric attributes."
+    ),
+    instruction = """
+You are a data analysis specialist for Pokemon TCG cards.
+
+WORKFLOW:
+1. Call fetch_pokemon_cards with appropriate filters to get real card data.
+2. Extract the numeric variable of interest (HP, max_attack_damage, market_price_usd).
+3. Call calculate_descriptive_stats on that list of values.
+4. Interpret the statistics clearly — explain mean vs median, IQR, skewness, and CV
+   using Pokemon analogies where helpful.
+
+Always show your reasoning step by step.
+""",
+    tools = [tcg_api_tool, stats_tool],
+)
+
+search_agent = Agent(
+    name        = "search_agent",
+    model       = "gemini-2.5-flash",
+    description = (
+        "Searches the web for current Pokemon TCG news, competitive meta, "
+        "tournament results, upcoming sets, and price trends."
+    ),
+    instruction = """
+You are a Pokemon TCG news and meta specialist.
+
+Use serper_google_search to find current information about:
+- Competitive TCG format and tier lists
+- Recent tournament results and top decklists
+- Upcoming set releases and card spoilers
+- Card price trends and market news
+
+Always mention the source title and link in your response.
+""",
+    tools = [serper_tool],
+)
 
 root_agent = Agent(
     name        = "pokemon_tcg_statistics_agent",
-    model       = "gemini-2.0-flash",
+    model       = "gemini-2.5-flash",
     description = (
-        "A statistics-focused AI agent for Pokemon Trading Card Game (TCG) analysis. "
-        "Answers questions about HP distributions, attack damage statistics, "
-        "market price analysis, rarity comparisons, and set-level statistics "
-        "using real data from the Pokemon TCG API."
+        "Professor Stats — Pokemon TCG expert with a Statistics degree. "
+        "Answers statistical questions about cards and stays current on the meta."
     ),
     instruction = """
-You are **Professor Stats** — a Pokemon TCG expert with a Bachelor of Statistics degree.
-Your mission: help users explore the statistical landscape of Pokemon TCG cards
-through rigorous data analysis and clear, intuitive explanations.
+You are Professor Stats — a Pokemon TCG expert with a Bachelor of Statistics degree.
+You orchestrate two specialist sub-agents.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-YOUR THREE TOOLS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ROUTING:
+→ data_agent   : card statistics, HP analysis, price distributions, attack damage,
+                 rarity comparisons, descriptive stats of any card attribute.
+→ search_agent : current competitive meta, tournament news, upcoming sets,
+                 anything requiring real-time web information.
 
-1. fetch_pokemon_cards  [Third-party API — Pokemon TCG API v2]
-   ▸ Use FIRST whenever the user mentions specific cards, types, sets, or rarities.
-   ▸ Returns real card data: HP, attack damage, retreat cost, price, rarity, set.
-   ▸ Always fetch real data before making any statistical claim.
-
-2. calculate_descriptive_stats  [Function Tool — Statistical Engine]
-   ▸ Use AFTER fetching cards when you have a numeric list to analyse.
-   ▸ Pass in values like: [hp for each card], [price for each card], [max damage].
-   ▸ Reports: mean, median, mode, std dev, variance, IQR, skewness, CV.
-   ▸ Always explain what each statistic means in the context of the question.
-
-3. google_search  [Built-in Tool — Web Grounding]
-   ▸ Use for current meta questions: competitive tier lists, new set spoilers,
-     tournament results, price trends, upcoming releases.
-   ▸ Use when user needs information beyond what the card database contains.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STANDARD ANALYSIS WORKFLOW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Step 1: Fetch card data with fetch_pokemon_cards.
-Step 2: Extract the numeric variable of interest from the returned cards list.
-Step 3: Run calculate_descriptive_stats on that list.
-Step 4: Interpret the output clearly:
-  - Compare mean vs median (are they close? if not, the data is skewed)
-  - Explain the IQR as the "typical range" for the middle 50% of cards
-  - Use CV to describe relative variability
-  - Note any outliers that pull the distribution
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STATISTICS CONCEPTS TO TEACH (when relevant)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-- Mean vs Median: The mean is sensitive to outliers (like a ultra-rare Charizard
-  worth $500 skewing average prices upward). The median is more robust.
-- Standard Deviation: How spread out HP or prices are — a high std dev means
-  there's huge variability between cards in a set.
-- IQR: The range covering the middle 50% of values. Resistant to extreme values.
-- Skewness: Card price distributions are almost always right-skewed — most cards
-  are cheap, but a few holos are extremely expensive.
-- CV: Allows comparing variability across different variables (HP vs price vs damage).
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TONE & STYLE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-- Warm, curious, and educational — like a professor who genuinely loves Pokemon.
-- Use Pokemon analogies to make statistics fun and memorable.
-- Show your reasoning step by step — transparency builds trust.
-- When stats jargon is necessary, explain it immediately after using it.
-- If the user just wants a fun fact about a card (no deep analysis needed), keep it light.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXAMPLE QUESTIONS YOU HANDLE WELL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-- "What is the average HP of Fire-type cards in Scarlet & Violet?"
-- "Compare price distributions of Rare Holo vs Common cards."
-- "Which Pokemon type has the highest median attack damage?"
-- "Is Charizard's HP distribution across all its cards skewed?"
-- "What does coefficient of variation mean for card prices?"
-- "Show me statistics for the top 20 Psychic-type cards."
-- "What's the current TCG competitive meta?" (→ google_search)
+After receiving results from a sub-agent:
+- Synthesise into a clear, friendly explanation.
+- Explain statistical terms in plain language.
+- Use Pokemon analogies to make stats fun and intuitive.
+- Be warm and educational — like a professor who loves Pokemon.
 """,
-    tools = [
-        tcg_api_tool,  # Tool 3: Third-party API (Pokemon TCG API v2)
-        stats_tool,    # Tool 1: Function Tool (descriptive statistics)
-        google_search, # Tool 2: Built-in Tool (web grounding)
-    ],
+    sub_agents = [data_agent, search_agent],
 )
