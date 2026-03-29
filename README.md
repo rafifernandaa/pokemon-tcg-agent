@@ -1,49 +1,32 @@
-# 🎴 Professor Stats — Pokemon TCG Statistics Agent
+# 🎴 Pokemon TCG Statistics Agent — Professor Stats
+**Track 1 — Build and Deploy AI Agents using Gemini, ADK, and Cloud Run**
 
-> **Track 1 Submission — Build and Deploy AI Agents using Gemini, ADK, and Cloud Run**
+An AI agent that answers statistical questions about Pokemon Trading Card Game data.
+Built with Google ADK + Gemini 2.0 Flash, deployed as a serverless REST API on Cloud Run.
 
-An AI agent that answers statistical questions about Pokemon Trading Card Game cards using real data. Built with Google ADK, Gemini 2.5 Flash, and deployed as a serverless container on Cloud Run.
-
-**Live Demo:** `https://pokemon-tcg-agent-676289354133.us-central1.run.app`
-
----
-
-## What It Does
-
-Professor Stats is a question-answering agent specialized in Pokemon TCG statistics. You can ask it things like:
-
-- *"What is the average HP of Fire-type cards?"*
-- *"Give me descriptive statistics on Charizard cards"*
-- *"Compare price distributions of Rare Holo vs Common cards"*
-- *"What is the current competitive TCG meta?"*
-
-The agent fetches **real card data** from the Pokemon TCG API, computes **proper descriptive statistics** (mean, median, std dev, IQR, skewness, CV), and explains the results in plain language — bridging Pokemon TCG and Statistics.
+**Live endpoint:** `https://pokemon-tcg-agent-676289354133.us-central1.run.app`
 
 ---
 
 ## Architecture
 
 ```
-User (Browser / curl)
+POST /run  {"message": "..."}
         │
         ▼
-  Cloud Run (us-central1)
-  ┌─────────────────────────────────────────┐
-  │  FastAPI  (main.py)                     │
-  │      │                                  │
-  │      ▼                                  │
-  │  Agentic Loop (google-genai SDK)        │
-  │      │                                  │
-  │      ├── Tool 1: calculate_descriptive_stats  (Function Tool)
-  │      ├── Tool 2: serper_google_search         (Custom Search Tool)
-  │      └── Tool 3: fetch_pokemon_cards          (Pokemon TCG API v2)
-  │                                         │
-  │  Gemini 2.5 Flash (Vertex AI)           │
-  └─────────────────────────────────────────┘
+  FastAPI (main.py)
+        │
+        ▼
+  Gemini 2.0 Flash ──► root_agent (orchestrator)
+                              │
+               ┌──────────────┴──────────────┐
+               ▼                             ▼
+         data_agent                    search_agent
+         ├── fetch_pokemon_cards        └── serper_google_search
+         │   (Pokemon TCG API v2)           (Serper.dev / Google)
+         └── calculate_descriptive_stats
+             (Python statistics module)
 ```
-
-### Why Stateless?
-Cloud Run scales instances dynamically. Rather than managing shared session state across instances (which requires Redis or Firestore), each request carries its own full context — a clean agentic loop that creates no persistent state. This is simpler, cheaper, and perfectly suited to the one-turn Q&A use case.
 
 ---
 
@@ -51,24 +34,314 @@ Cloud Run scales instances dynamically. Rather than managing shared session stat
 
 | # | Tool | Type | Purpose |
 |---|------|------|---------|
-| 1 | `calculate_descriptive_stats` | Function Tool (pure Python) | Computes mean, median, std dev, IQR, Q1/Q3, skewness, coefficient of variation |
-| 2 | `serper_google_search` | Custom Function Tool (Serper.dev API) | Real-time Google search for TCG meta, news, tournament results |
-| 3 | `fetch_pokemon_cards` | Third-party API Tool (pokemontcg.io) | Fetches real card data: HP, attack damage, retreat cost, rarity, market price |
+| 1 | `calculate_descriptive_stats` | Function Tool | Mean, median, std dev, IQR, skewness, CV |
+| 2 | `serper_google_search` | Function Tool (3rd-party) | Current TCG meta, news, tournament results |
+| 3 | `fetch_pokemon_cards` | Function Tool (3rd-party API) | Live card data from pokemontcg.io |
+
+---
+
+## Prerequisites
+
+- Python 3.11+
+- `gcloud` CLI installed and authenticated
+- Google Cloud project with billing enabled
+- Gemini API key → https://aistudio.google.com/app/apikey
+- Pokemon TCG API key (free) → https://dev.pokemontcg.io
+- Serper API key (free tier) → https://serper.dev
+
+---
+
+## Local Development
+
+### Step 1 — Clone the repo
+
+```bash
+git clone https://github.com/your-username/pokemon-tcg-agent.git
+cd pokemon-tcg-agent
+```
+
+### Step 2 — Create virtual environment
+
+```bash
+python3 -m venv .venv
+```
+
+### Step 3 — Activate virtual environment
+
+```bash
+# Linux / macOS / Cloud Shell
+source .venv/bin/activate
+
+# Windows (Command Prompt)
+.venv\Scripts\activate.bat
+
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+```
+
+You should see `(.venv)` at the start of your terminal prompt.
+
+### Step 4 — Upgrade pip and install Google ADK
+
+```bash
+pip install --upgrade pip
+pip install google-adk
+```
+
+### Step 5 — Scaffold ADK project with `adk create`
+
+```bash
+adk create pokemon_tcg_stats
+```
+
+This generates the required ADK package structure:
+
+```
+pokemon_tcg_stats/
+├── agent.py       ← define your agent here
+├── __init__.py    ← ADK package marker
+└── .env           ← API keys and config
+```
+
+### Step 6 — Replace generated files with project files
+
+Copy the files from this repo into `pokemon_tcg_stats/`:
+
+```bash
+cp agent.py pokemon_tcg_stats/agent.py
+cp __init__.py pokemon_tcg_stats/__init__.py
+```
+
+### Step 7 — Fill in `pokemon_tcg_stats/.env`
+
+```bash
+# Google Cloud / Vertex AI
+GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+GOOGLE_CLOUD_LOCATION=us-central1
+GOOGLE_GENAI_USE_VERTEXAI=TRUE
+
+# OR use Gemini Developer API (simpler for local testing)
+# GOOGLE_GENAI_USE_VERTEXAI=FALSE
+# GOOGLE_API_KEY=your-gemini-api-key
+
+# Pokemon TCG API — free key at https://dev.pokemontcg.io
+POKEMON_TCG_API_KEY=your-pokemon-tcg-api-key
+
+# Serper.dev — free tier at https://serper.dev
+SERPER_API_KEY=your-serper-api-key
+```
+
+> ⚠️ Never commit `.env` to Git — it is already listed in `.gitignore`
+
+### Step 8 — Install all dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## Running Locally
+
+### Option A — Terminal chat with `adk run`
+
+Runs the agent directly in your terminal as an interactive chat session.
+
+```bash
+adk run pokemon_tcg_stats
+```
+
+Example session:
+```
+You: What is the average HP of Fire-type cards?
+Agent: I'll fetch the data first...
+[fetches cards → computes stats]
+The average HP of Fire-type cards is 112.4, with a median of 110...
+```
+
+Type `exit` or press `Ctrl+C` to quit.
+
+### Option B — Web UI with `adk web` (recommended for demo)
+
+Launches a browser-based chat interface at `http://localhost:8000`.
+
+```bash
+adk web
+```
+
+Then open your browser and go to:
+```
+http://localhost:8000
+```
+
+Select `pokemon_tcg_stats` from the agent dropdown and start chatting.
+
+---
+
+## Deploy to Cloud Run
+
+### Step 1 — Set environment variables
+
+```bash
+export PROJECT_ID="your-gcp-project-id"
+export REGION="us-central1"
+export SERVICE_NAME="pokemon-tcg-agent"
+export SA_NAME="pokemon-tcg-agent-sa"
+export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+```
+
+### Step 2 — Enable required GCP APIs
+
+```bash
+gcloud services enable \
+  run.googleapis.com \
+  artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com \
+  aiplatform.googleapis.com \
+  compute.googleapis.com \
+  --project=$PROJECT_ID
+```
+
+### Step 3 — Create service account
+
+```bash
+gcloud iam service-accounts create $SA_NAME \
+  --display-name="Pokemon TCG Agent Service Account" \
+  --project=$PROJECT_ID
+```
+
+### Step 4 — Bind IAM roles to service account
+
+```bash
+# Vertex AI — to call Gemini
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/aiplatform.user"
+
+# Cloud Run Invoker — for service-to-service auth
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/run.invoker"
+
+# Logs Writer — write to Cloud Logging
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/logging.logWriter"
+```
+
+### Step 5 — Build container image with Cloud Build
+
+```bash
+gcloud builds submit \
+  --tag gcr.io/$PROJECT_ID/$SERVICE_NAME \
+  --project=$PROJECT_ID
+```
+
+This uses the `Dockerfile` in the project root to build and push the image
+to Google Container Registry.
+
+### Step 6 — Deploy to Cloud Run
+
+```bash
+gcloud run deploy $SERVICE_NAME \
+  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
+  --region $REGION \
+  --platform managed \
+  --allow-unauthenticated \
+  --max-instances 3 \
+  --memory 512Mi \
+  --timeout 120 \
+  --service-account $SA_EMAIL \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GOOGLE_GENAI_USE_VERTEXAI=TRUE,POKEMON_TCG_API_KEY=your-pokemon-tcg-api-key,SERPER_API_KEY=your-serper-api-key" \
+  --project=$PROJECT_ID
+```
+
+### Step 7 — Get your service URL
+
+```bash
+gcloud run services describe $SERVICE_NAME \
+  --region $REGION \
+  --format='value(status.url)'
+```
+
+Output example:
+```
+https://pokemon-tcg-agent-676289354133.us-central1.run.app
+```
+
+### Step 8 — Test the deployed agent
+
+```bash
+export SERVICE_URL=$(gcloud run services describe $SERVICE_NAME \
+  --region $REGION --format='value(status.url)')
+
+# Health check
+curl $SERVICE_URL/
+
+# Ask Professor Stats a question
+curl -X POST $SERVICE_URL/run \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is the average HP of Fire-type cards?"}'
+```
+
+Expected response:
+```json
+{
+  "response": "Based on 20 Fire-type cards fetched: the average HP is 112.4, median is 110.0, std dev is 28.3...",
+  "agent": "pokemon_tcg_statistics_agent"
+}
+```
+
+---
+
+## API Reference
+
+### `GET /`
+Health check.
+
+**Response:**
+```json
+{"status": "ok", "agent": "pokemon_tcg_statistics_agent", "model": "gemini-2.0-flash-001"}
+```
+
+### `POST /run`
+Send a message to Professor Stats.
+
+**Request body:**
+```json
+{"message": "Your question here"}
+```
+
+**Response:**
+```json
+{"response": "Agent's answer...", "agent": "pokemon_tcg_statistics_agent"}
+```
+
+**Example questions:**
+```
+"What is the average HP of Fire-type cards in Scarlet & Violet?"
+"Compare price distributions of Rare Holo vs Common cards."
+"Which Pokemon type has the highest median attack damage?"
+"Is the HP distribution of Charizard cards skewed?"
+"What does coefficient of variation mean for card prices?"
+"What's the current Pokemon TCG competitive meta?"
+```
 
 ---
 
 ## Project Structure
 
 ```
-pokemon_tcg_agent/
-├── main.py                      # FastAPI server + agentic loop (entrypoint)
-├── Dockerfile                   # Container build config
-├── requirements.txt             # Python dependencies
-├── .dockerignore
-├── .env                         # Local API keys (never committed)
-└── pokemon_tcg_stats/
-    ├── __init__.py              # ADK package marker
-    └── agent.py                 # Tool definitions (stats, search, TCG API)
+pokemon-tcg-agent/
+├── main.py                    ← FastAPI entrypoint (Cloud Run)
+├── Dockerfile                 ← Container build config
+├── requirements.txt           ← Python dependencies
+├── .gitignore
+├── README.md
+└── pokemon_tcg_stats/         ← ADK agent package
+    ├── __init__.py            ← ADK package marker
+    ├── agent.py               ← Agent + 3 tools definition
+    └── .env                   ← API keys (never commit!)
 ```
 
 ---
@@ -78,143 +351,26 @@ pokemon_tcg_agent/
 | Component | Technology |
 |-----------|-----------|
 | Agent Framework | Google ADK (Agent Development Kit) |
-| LLM | Gemini 2.5 Flash via Vertex AI |
+| LLM | Gemini 2.0 Flash 001 via Vertex AI |
+| Tool 1 | Python `statistics` module — Function Tool |
+| Tool 2 | Serper.dev Google Search — Function Tool |
+| Tool 3 | Pokemon TCG API v2 (`pokemontcg.io`) — Function Tool |
 | HTTP Server | FastAPI + Uvicorn |
-| Tool 1 | Python `statistics` stdlib (Function Tool) |
-| Tool 2 | Serper.dev Google Search API (Custom Function Tool) |
-| Tool 3 | Pokemon TCG API v2 — pokemontcg.io (Third-party API) |
-| Containerization | Docker (python:3.11-slim) |
-| Deployment | Google Cloud Run (us-central1) |
-| Build | Google Cloud Build + Artifact Registry |
+| Deployment | Google Cloud Run |
+| Container Registry | Google Container Registry (GCR) |
+| Build | Google Cloud Build |
 
 ---
 
-## Local Setup
+## Deactivate / Cleanup
 
-### Prerequisites
-- Python 3.11+
-- Google Cloud project with Vertex AI enabled
-- Pokemon TCG API key → [pokemontcg.io](https://dev.pokemontcg.io)
-- Serper API key → [serper.dev](https://serper.dev) (free tier: 2,500 searches/month)
-
-### 1. Clone & create virtual environment
 ```bash
-git clone https://github.com/<your-username>/pokemon-tcg-agent
-cd pokemon-tcg-agent
-python3 -m venv .venv
-source .venv/bin/activate
+# Deactivate virtual environment
+deactivate
+
+# Delete Cloud Run service
+gcloud run services delete $SERVICE_NAME --region=$REGION
+
+# Delete container image
+gcloud container images delete gcr.io/$PROJECT_ID/$SERVICE_NAME --force-delete-tags
 ```
-
-### 2. Install dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Configure environment variables
-```bash
-# pokemon_tcg_stats/.env
-GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-GOOGLE_CLOUD_LOCATION=us-central1
-GOOGLE_GENAI_USE_VERTEXAI=TRUE
-POKEMON_TCG_API_KEY=your-pokemon-tcg-api-key
-SERPER_API_KEY=your-serper-api-key
-```
-
-### 4. Run locally
-```bash
-python main.py
-# Open http://localhost:8080
-```
-
-### 5. Test via curl
-```bash
-curl -X POST http://localhost:8080/run \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is the average HP of Fire-type cards?"}'
-```
-
----
-
-## Deployment to Cloud Run
-
-### Enable GCP APIs
-```bash
-gcloud services enable \
-  run.googleapis.com \
-  artifactregistry.googleapis.com \
-  cloudbuild.googleapis.com \
-  aiplatform.googleapis.com \
-  compute.googleapis.com
-```
-
-### Create Service Account & bind IAM roles
-```bash
-gcloud iam service-accounts create pokemon-tcg-agent-sa \
-  --display-name="Pokemon TCG Agent SA"
-
-SA="pokemon-tcg-agent-sa@$PROJECT_ID.iam.gserviceaccount.com"
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:$SA" --role="roles/aiplatform.user"
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:$SA" --role="roles/run.invoker"
-
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:$SA" --role="roles/logging.logWriter"
-```
-
-### Build & deploy
-```bash
-export PROJECT_ID="your-gcp-project-id"
-export REGION="us-central1"
-
-gcloud builds submit --tag gcr.io/$PROJECT_ID/pokemon-tcg-agent .
-
-gcloud run deploy pokemon-tcg-agent \
-  --image gcr.io/$PROJECT_ID/pokemon-tcg-agent \
-  --region $REGION \
-  --allow-unauthenticated \
-  --service-account "pokemon-tcg-agent-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=$REGION,GOOGLE_GENAI_USE_VERTEXAI=TRUE,POKEMON_TCG_API_KEY=<key>,SERPER_API_KEY=<key>"
-```
-
----
-
-## API Reference
-
-### `GET /`
-Returns the web UI (HTML) for interacting with Professor Stats in the browser.
-
-### `POST /run`
-Send a message to the agent and receive a response.
-
-**Request:**
-```json
-{ "message": "What is the average HP of Water-type cards?" }
-```
-
-**Response:**
-```json
-{
-  "response": "Based on 20 Water-type cards fetched...\n\nMean HP: 112.5\nMedian HP: 110.0\n...",
-  "agent": "pokemon_tcg_statistics_agent"
-}
-```
-
----
-
-## Key Lessons Learned
-
-- **ADK `google_search` built-in cannot be mixed with `FunctionTool`** in the same agent — replaced with a custom Serper.dev function tool to avoid `INVALID_ARGUMENT` errors.
-- **ADK `Runner` + `InMemorySessionService` has session lookup issues** when session lifecycle and runner scope don't align — resolved by bypassing ADK Runner entirely and implementing a direct agentic loop with `google-genai` SDK.
-- **Vertex AI model names require an explicit version suffix** — `gemini-2.5-flash` not `gemini-2.0-flash` (deprecated for new projects as of March 2026).
-- **Cloud Run stateless design** eliminates session persistence complexity — each request is fully self-contained.
-
----
-
-## Author
-
-**Rafi Fernanda Aldin**
-Bachelor of Statistics — Data Science, Psychometrics & Cloud Data Systems
-*"Turning Uncertainty Into Insight"*
