@@ -1,10 +1,7 @@
 # 🎴 Pokemon TCG Statistics Agent — Professor Stats
-**Track 1 — Build and Deploy AI Agents using Gemini, ADK, and Cloud Run**
 
 An AI agent that answers statistical questions about Pokemon Trading Card Game data.
 Built with Google ADK + Gemini 2.0 Flash, deployed as a serverless REST API on Cloud Run.
-
-**Live endpoint:** `https://pokemon-tcg-agent-676289354133.us-central1.run.app`
 
 ---
 
